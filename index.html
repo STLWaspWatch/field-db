@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0d1117" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Wasp Field Log" />
+  <title>Wasp Field Log</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  
+  <!-- Task 4: Supabase Setup -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    // --- SUPABASE CONFIGURATION ---
+    // Input your credentials here
+    const SUPABASE_URL = "https://lchpzmneyjpurbnnpvny.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_aQtM6uAUXM_zm6VcRKrz1g_59WCNwpV";
+    // ------------------------------
+    
+    // Initialize Supabase Client
+    const { createClient } = supabase;
+    const _supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  </script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0d1117; color: #e6edf3; font-family: 'DM Mono', monospace; }
+    #root { max-width: 430px; margin: 0 auto; min-height: 100vh; }
+    /* Original styles preserved */
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const FIELDS = {
+      nestId: "", date: "", time: "", observer: "",
+      species: "",
+      lat: "", lng: "", locality: "", state: "", nestOrientation: "",
+      nestStage: "", nestExposure: "", nestReuse: "",
+      substrateCategory: "", substrate: "", nestHeight: "",
+      foundressCount: "", malesPresent: "",
+      otherSpecies: "", notes: "", photo: "",
+    };
+
+    function generateNestId(records) {
+      const nums = records
+        .map(r => { 
+          const nest_id = r.nest_id || r.nestId; // Handle both DB and local field names
+          const m = nest_id && nest_id.match(/NEST-(\d+)/); 
+          return m ? parseInt(m[1]) : 0; 
+        })
+        .filter(n => n > 0);
+      const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+      return "NEST-" + String(next).padStart(3, "0");
+    }
+
+    const ORIENTATIONS = ["N","NE","E","SE","S","SW","W","NW"];
+    const NEST_STAGES = ["Founding","Pre-emergence","Post-emergence","Mature","Declining","Abandoned","Uncertain"];
+    const NATURAL_SUBSTRATES = ["Wood","Plant","Herbaceous","Rock","Other"];
+    const MANMADE_SUBSTRATES = ["Metal","Plastic","Concrete","Wood (processed)","Other"];
+    const WASP_SPECIES = [
+      "Polistes annularis","Polistes apachus","Polistes aurifer","Polistes bellicosus","Polistes canadensis",
+        "Polistes dominula","Polistes dorsalis","Polistes exclamans","Polistes fuscatus","Polistes metricus",
+        "Polistes rubiginosus","Unknown / To be confirmed",
+    ];
+    const US_STATES = [
+      "Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut",
+      "Delaware","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa",
+      "Kansas","Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan",
+      "Minnesota","Mississippi","Missouri","Montana","Nebraska","Nevada","New Hampshire",
+      "New Jersey","New Mexico","New York","North Carolina","North Dakota","Ohio",
+      "Oklahoma","Oregon","Pennsylvania","Rhode Island","South Carolina","South Dakota",
+      "Tennessee","Texas","Utah","Vermont","Virginia","Washington","West Virginia",
+      "Wisconsin","Wyoming"
+    ];
+
+    function WaspApp() {
+      const [view, setView] = useState("home");
+      const [records, setRecords] = useState([]);
+      const [form, setForm] = useState({...FIELDS});
+      const [saved, setSaved] = useState(false);
+      const [selectedRecord, setSelectedRecord] = useState(null);
+      const [gpsLoading, setGpsLoading] = useState(false);
+      const [localityLoading, setLocalityLoading] = useState(false);
+      const [step, setStep] = useState(0);
+      const [uploading, setUploading] = useState(false);
+      const photoRef = useRef();
+
+      // Task 3: Data Fetching from Supabase
+      useEffect(() => {
+        fetchRecords();
+      }, []);
+
+      async function fetchRecords() {
+        try {
+          const { data, error } = await _supabase
+            .from('wasp_observations')
+            .select('*')
+            .order('created_at', { ascending: false });
+          
+          if (error) throw error;
+          setRecords(data || []);
+        } catch (err) {
+          console.error("Error fetching from Supabase:", err);
+        }
+      }
+
+      useEffect(() => {
+        if (view !== "new") return;
+        const tick = () => {
+          const now = new Date();
+          const date = now.getFullYear() + "-" + String(now.getMonth()+1).padStart(2,"0") + "-" + String(now.getDate()).padStart(2,"0");
+          const time = String(now.getHours()).padStart(2,"0") + ":" + String(now.getMinutes()).padStart(2,"0") + ":" + String(now.getSeconds()).padStart(2,"0");
+          setForm(f => ({...f, date, time}));
+        };
+        tick();
+        const iv = setInterval(tick, 1000);
+        return () => clearInterval(iv);
+      }, [view]);
+
+      function handleChange(field, val) {
+        setForm(f => {
+          const updated = {...f, [field]: val};
+          if (field === "substrateCategory") updated.substrate = "";
+          return updated;
+        });
+      }
+
+      function getGPS() {
+        setGpsLoading(true);
+        navigator.geolocation.getCurrentPosition(
+          async pos => {
+            const lat = pos.coords.latitude.toFixed(6);
+            const lng = pos.coords.longitude.toFixed(6);
+            setForm(f => ({...f, lat, lng}));
+            setGpsLoading(false);
+            setLocalityLoading(true);
+            try {
+              const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json`);
+              const data = await res.json();
+              const a = data.address || {};
+              const place = a.village||a.town||a.city||a.county||a.state_district||a.state||"Unknown";
+              const country = a.country || "";
+              setForm(f => ({...f, lat, lng, locality: `${place}, ${country}`.replace(/, $/, "")}));
+            } catch {
+              setForm(f => ({...f, locality: `${lat}, ${lng}`}));
+            }
+            setLocalityLoading(false);
+          },
+          () => setGpsLoading(false)
+        );
+      }
+
+      // Task 2: Image Handling with Supabase Storage
+      async function handlePhoto(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        setUploading(true);
+        try {
+          const fileExt = file.name.split('.').pop();
+          const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
+          const filePath = `observations/${fileName}`;
+
+          const { error: uploadError } = await _supabase.storage
+            .from('wasp-photos')
+            .upload(filePath, file);
+
+          if (uploadError) throw uploadError;
+
+          const { data: { publicUrl } } = _supabase.storage
+            .from('wasp-photos')
+            .getPublicUrl(filePath);
+
+          handleChange("photo", publicUrl);
+        } catch (err) {
+          alert("Upload failed: " + err.message);
+        } finally {
+          setUploading(false);
+        }
+      }
+
+      // Task 1: Database Mapping & Submission
+      async function submitRecord() {
+        try {
+          const payload = {
+            nest_id: form.nestId,
+            species: form.species,
+            observer: form.observer,
+            date: form.date,
+            time: form.time,
+            latitude: parseFloat(form.lat) || null,
+            longitude: parseFloat(form.lng) || null,
+            locality: form.locality,
+            state: form.state,
+            nest_orientation: form.nestOrientation,
+            nest_stage: form.nestStage,
+            nest_exposure: form.nestExposure,
+            nest_reuse: form.nestReuse,
+            substrate_category: form.substrateCategory,
+            substrate: form.substrate,
+            nest_height: parseFloat(form.nestHeight) || null,
+            foundress_count: parseInt(form.foundressCount) || null,
+            males_present: form.malesPresent,
+            other_species: form.otherSpecies,
+            notes: form.notes,
+            image_url: form.photo
+          };
+
+          const { error } = await _supabase
+            .from('wasp_observations')
+            .insert([payload]);
+
+          if (error) throw error;
+
+          setSaved(true);
+          fetchRecords();
+          setTimeout(() => { setSaved(false); setForm({...FIELDS}); setStep(0); setView("home"); }, 1500);
+        } catch (err) {
+          alert("Error saving record: " + err.message);
+        }
+      }
+
+      async function deleteRecord(id) { 
+        try {
+          const { error } = await _supabase
+            .from('wasp_observations')
+            .delete()
+            .eq('id', id);
+          if (error) throw error;
+          fetchRecords();
+          setView("list"); 
+        } catch (err) {
+          alert("Error deleting: " + err.message);
+        }
+      }
+
+      function exportCSV() {
+        if (!records.length) return;
+        
+        // We removed "image_url" from the ignore list so it shows up now!
+        // We still ignore "id" (internal database number) and "created_at".
+        const keys = Object.keys(records[0]).filter(k => k !== "id" && k !== "created_at");
+        
+        const header = keys.join(",");
+        
+        const rows = records.map(r => 
+          keys.map(k => {
+            // This cleans the data so commas in your notes don't mess up the spreadsheet columns
+            let val = r[k] === null || r[k] === undefined ? "" : r[k];
+            return `"${val.toString().replace(/"/g, '""')}"`;
+          }).join(",")
+        );
+        
+        const csv = [header, ...rows].join("\n");
+        const uri = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
+        
+        const a = document.createElement("a");
+        a.setAttribute("href", uri);
+        a.setAttribute("download", `wasp_data_${new Date().toISOString().split("T")[0]}.csv`);
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+
+      const steps = [
+        {title:"Identification", icon:"🪪"},
+        {title:"Species", icon:"🔬"},
+        {title:"Location", icon:"📍"},
+        {title:"Nest Status", icon:"🪲"},
+        {title:"Nest Characteristics", icon:"📐"},
+        {title:"Colony", icon:"👑"},
+        {title:"Photo & Notes", icon:"📷"},
+      ];
+
+      const s = {
+        app: { fontFamily:"'DM Mono',monospace", background:"#0d1117", minHeight:"100vh", color:"#e6edf3", maxWidth:430, margin:"0 auto", position:"relative" },
+        header: { background:"#161b22", borderBottom:"1px solid #30363d", padding:"16px 20px", display:"flex", alignItems:"center", gap:12, position:"sticky", top:0, zIndex:100 },
+        headerTitle: { fontSize:16, fontWeight:700, color:"#f0f6fc", letterSpacing:1 },
+        headerSub: { fontSize:10, color:"#8b949e", letterSpacing:2, textTransform:"uppercase" },
+        body: { padding:"20px 16px", paddingBottom:100 },
+        bigBtn: { width:"100%", padding:"18px 24px", background:"#238636", color:"#fff", border:"none", borderRadius:10, fontSize:15, fontFamily:"'DM Mono',monospace", fontWeight:700, letterSpacing:1, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10, marginBottom:12 },
+        outlineBtn: { width:"100%", padding:"16px 24px", background:"transparent", color:"#58a6ff", border:"1px solid #30363d", borderRadius:10, fontSize:14, fontFamily:"'DM Mono',monospace", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8, marginBottom:12 },
+        card: { background:"#161b22", border:"1px solid #30363d", borderRadius:10, padding:"14px 16px", marginBottom:10, cursor:"pointer" },
+        label: { fontSize:11, color:"#8b949e", letterSpacing:1, textTransform:"uppercase", marginBottom:6, display:"block" },
+        input: { width:"100%", background:"#0d1117", border:"1px solid #30363d", borderRadius:8, padding:"12px 14px", color:"#e6edf3", fontSize:15, fontFamily:"'DM Mono',monospace", boxSizing:"border-box", marginBottom:16 },
+        liveBox: { width:"100%", background:"#0a1628", border:"1px solid #1f6feb", borderRadius:8, padding:"12px 14px", color:"#58a6ff", fontSize:16, fontFamily:"'DM Mono',monospace", boxSizing:"border-box", marginBottom:16, letterSpacing:3, fontWeight:700 },
+        select: { width:"100%", background:"#0d1117", border:"1px solid #30363d", borderRadius:8, padding:"12px 14px", color:"#e6edf3", fontSize:15, fontFamily:"'DM Mono',monospace", boxSizing:"border-box", marginBottom:16, appearance:"none" },
+        textarea: { width:"100%", background:"#0d1117", border:"1px solid #30363d", borderRadius:8, padding:"12px 14px", color:"#e6edf3", fontSize:14, fontFamily:"'DM Mono',monospace", boxSizing:"border-box", marginBottom:16, minHeight:80, resize:"vertical" },
+        stepBar: { display:"flex", gap:3, marginBottom:20 },
+        stepDot: (active, done) => ({ flex:1, height:3, borderRadius:4, background: done?"#238636":active?"#58a6ff":"#30363d", transition:"background 0.3s" }),
+        gpsBtn: { background:"#1f6feb", border:"none", borderRadius:8, color:"#fff", padding:"12px 16px", fontFamily:"'DM Mono',monospace", fontSize:13, cursor:"pointer", marginBottom:12, width:"100%" },
+        chipRow: { display:"flex", flexWrap:"wrap", gap:8, marginBottom:16 },
+        chip: (sel) => ({ padding:"8px 14px", borderRadius:20, border: sel?"1px solid #58a6ff":"1px solid #30363d", background: sel?"#1f3a5f":"transparent", color: sel?"#58a6ff":"#8b949e", fontSize:13, fontFamily:"'DM Mono',monospace", cursor:"pointer" }),
+        navRow: { display:"flex", gap:10, marginTop:8 },
+        navBtn: (p) => ({ flex:1, padding:"14px", background: p?"#238636":"transparent", border: p?"none":"1px solid #30363d", borderRadius:10, color: p?"#fff":"#8b949e", fontFamily:"'DM Mono',monospace", fontSize:14, fontWeight: p?700:400, cursor:"pointer" }),
+        backBtn: { background:"none", border:"none", color:"#58a6ff", fontSize:14, fontFamily:"'DM Mono',monospace", cursor:"pointer", padding:0, marginBottom:16, display:"flex", alignItems:"center", gap:6 },
+        tag: { background:"#1f3a5f", color:"#58a6ff", borderRadius:6, padding:"3px 8px", fontSize:11, marginRight:4, marginBottom:4, display:"inline-block" },
+        savedBanner: { position:"fixed", bottom:30, left:"50%", transform:"translateX(-50%)", background:"#238636", color:"#fff", padding:"14px 28px", borderRadius:40, fontFamily:"'DM Mono',monospace", fontWeight:700, fontSize:14, zIndex:999, boxShadow:"0 4px 20px rgba(35,134,54,0.5)" },
+        statsRow: { display:"flex", gap:10, marginBottom:20 },
+        statBox: { flex:1, background:"#161b22", border:"1px solid #30363d", borderRadius:10, padding:"12px", textAlign:"center" },
+        statNum: { fontSize:26, fontWeight:700, color:"#58a6ff" },
+        statLabel: { fontSize:10, color:"#8b949e", textTransform:"uppercase", letterSpacing:1 },
+        sectionCard: { background:"#161b22", border:"1px solid #30363d", borderRadius:10, padding:16, marginBottom:16 },
+        sectionTitle: { fontSize:11, color:"#8b949e", textTransform:"uppercase", letterSpacing:1, marginBottom:12 },
+        liveBadge: { display:"inline-block", background:"#0d3118", color:"#3fb950", fontSize:9, padding:"2px 7px", borderRadius:20, border:"1px solid #238636", marginLeft:8, letterSpacing:1, verticalAlign:"middle" },
+        stepLabel: { fontSize:12, color:"#58a6ff", marginBottom:16, letterSpacing:1 },
+      };
+
+      const LiveField = ({value, label}) => (
+        <div style={{marginBottom:16}}>
+          <label style={s.label}>{label}<span style={s.liveBadge}>● LIVE SYNC</span></label>
+          <div style={s.liveBox}>{value || "—"}</div>
+        </div>
+      );
+
+      const substrateOptions = form.substrateCategory === "Natural" ? NATURAL_SUBSTRATES :
+                               form.substrateCategory === "Man-made" ? MANMADE_SUBSTRATES : [];
+
+      const today = new Date().toISOString().split("T")[0];
+
+      // ── HOME ──
+      if (view === "home") return (
+        <div style={s.app}>
+          <div style={s.header}>
+            <span style={{fontSize:24}}>🐝</span>
+            <div><div style={s.headerTitle}>WASP FIELD LOG</div><div style={s.headerSub}>Paper Wasp Research</div></div>
+          </div>
+          <div style={s.body}>
+            <div style={s.statsRow}>
+              <div style={s.statBox}><div style={s.statNum}>{records.length}</div><div style={s.statLabel}>Nests</div></div>
+              <div style={s.statBox}><div style={s.statNum}>{records.filter(r=>r.date===today).length}</div><div style={s.statLabel}>Today</div></div>
+              <div style={s.statBox}><div style={s.statNum}>{records.reduce((sum,r)=>sum+(parseInt(r.foundress_count)||0),0)}</div><div style={s.statLabel}>Foundresses</div></div>
+            </div>
+            <button style={s.bigBtn} onClick={()=>{setForm({...FIELDS, nestId: generateNestId(records)});setStep(0);setView("new");}}>＋ &nbsp;New Nest Record</button>
+            <button style={s.outlineBtn} onClick={()=>setView("list")}>📋 &nbsp;View All Records ({records.length})</button>
+            {records.length > 0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ &nbsp;Export CSV</button>}
+            {records.length > 0 && <>
+              <div style={{fontSize:11,color:"#8b949e",textTransform:"uppercase",letterSpacing:1,marginTop:20,marginBottom:12}}>Recent Records</div>
+              {records.slice(0,3).map(r=>(
+                <div key={r.id} style={s.card} onClick={()=>{setSelectedRecord(r);setView("detail");}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                    <div>
+                      <div style={{fontWeight:700,fontSize:14}}>{r.nest_id||r.nestId||"Unnamed Nest"}</div>
+                      {r.species && <div style={{fontSize:11,color:"#8b949e",fontStyle:"italic",marginTop:2}}>{r.species}</div>}
+                    </div>
+                    <span style={{fontSize:11,color:"#8b949e"}}>{r.date}</span>
+                  </div>
+                  <div style={{marginTop:8}}>
+                    {r.nest_stage && <span style={s.tag}>{r.nest_stage}</span>}
+                    {r.foundress_count && <span style={s.tag}>{r.foundress_count} foundress{r.foundress_count!=="1"?"es":""}</span>}
+                    {r.observer && <span style={s.tag}>👤 {r.observer}</span>}
+                    {r.state && <span style={s.tag}>📌 {r.state}</span>}
+                    {r.image_url && <span style={s.tag}>📷</span>}
+                  </div>
+                </div>
+              ))}
+            </>}
+          </div>
+        </div>
+      );
+
+      // ── NEW RECORD ──
+      if (view === "new") return (
+        <div style={s.app}>
+          <div style={s.header}>
+            <span style={{fontSize:24}}>🐝</span>
+            <div>
+              <div style={s.headerTitle}>NEW RECORD</div>
+              <div style={s.headerSub}>{steps[step].icon} {steps[step].title}</div>
+            </div>
+          </div>
+          <div style={s.body}>
+            <div style={s.stepBar}>{steps.map((_,i)=><div key={i} style={s.stepDot(i===step,i<step)} />)}</div>
+            <div style={{fontSize:10, color:"#8b949e", marginBottom:16, letterSpacing:1}}>STEP {step+1} OF {steps.length}</div>
+
+            {/* STEP 1 — Identification */}
+            {step===0 && <>
+              <label style={s.label}>Nest ID <span style={s.liveBadge}>AUTO</span></label>
+              <div style={{...s.liveBox, letterSpacing:4, marginBottom:16}}>{form.nestId}</div>
+              <label style={s.label}>Observer Name</label>
+              <input style={s.input} value={form.observer} onChange={e=>handleChange("observer",e.target.value)} placeholder="Your full name" />
+              <LiveField value={form.date} label="Date" />
+              <LiveField value={form.time} label="Time" />
+            </>}
+
+            {/* STEP 2 — Species */}
+            {step===1 && <>
+              <label style={s.label}>Wasp Species</label>
+              <select style={s.select} value={form.species} onChange={e=>handleChange("species",e.target.value)}>
+                <option value="">Select species...</option>
+                {WASP_SPECIES.map(sp=><option key={sp} value={sp}>{sp}</option>)}
+              </select>
+              {form.species==="Unknown / To be confirmed" && <>
+                <label style={s.label}>Morphological notes</label>
+                <textarea style={s.textarea} value={form.notes} onChange={e=>handleChange("notes",e.target.value)} placeholder="Describe coloration, size, markings..." />
+              </>}
+              <div style={{background:"#0a1628",border:"1px solid #1f3a5f",borderRadius:8,padding:12,fontSize:12,color:"#8b949e"}}>
+                💡 Select "Unknown / To be confirmed" if unsure — confirm later from photo.
+              </div>
+            </>}
+
+            {/* STEP 3 — Location */}
+            {step===2 && <>
+              <button style={s.gpsBtn} onClick={getGPS}>{gpsLoading ? "⏳ Getting GPS..." : "📍 Capture GPS + Auto-locality"}</button>
+              <label style={s.label}>Latitude</label>
+              <input style={s.input} value={form.lat} onChange={e=>handleChange("lat",e.target.value)} placeholder="Auto-filled or type manually" />
+              <label style={s.label}>Longitude</label>
+              <input style={s.input} value={form.lng} onChange={e=>handleChange("lng",e.target.value)} placeholder="Auto-filled or type manually" />
+              <label style={s.label}>Locality {localityLoading && <span style={{color:"#58a6ff",fontSize:10}}>⏳ looking up...</span>}</label>
+              <input style={s.input} value={form.locality} onChange={e=>handleChange("locality",e.target.value)} placeholder="Auto-filled or type manually" />
+              <label style={s.label}>State</label>
+              <select style={s.select} value={form.state} onChange={e=>handleChange("state",e.target.value)}>
+                <option value="">Select state...</option>
+                {US_STATES.map(st=><option key={st} value={st}>{st}</option>)}
+              </select>
+            </>}
+
+            {/* STEP 4 — Nest Status */}
+            {step===3 && <>
+              <label style={s.label}>Nest Stage</label>
+              <select style={s.select} value={form.nestStage} onChange={e=>handleChange("nestStage",e.target.value)}>
+                <option value="">Select stage...</option>
+                {NEST_STAGES.map(st=><option key={st} value={st}>{st}</option>)}
+              </select>
+              <label style={s.label}>Nest Exposure</label>
+              <select style={s.select} value={form.nestExposure} onChange={e=>handleChange("nestExposure",e.target.value)}>
+                <option value="">Select exposure...</option>
+                <option value="Exposed">Exposed</option>
+                <option value="Enclosed">Enclosed</option>
+              </select>
+              <label style={s.label}>Nest Reuse</label>
+              <select style={s.select} value={form.nestReuse} onChange={e=>handleChange("nestReuse",e.target.value)}>
+                <option value="">Select...</option>
+                <option value="New">New</option>
+                <option value="Old / Reused">Old / Reused</option>
+              </select>
+            </>}
+
+            {/* STEP 5 — Nest Characteristics */}
+            {step===4 && <>
+              <label style={s.label}>Substrate Category</label>
+              <div style={s.chipRow}>
+                {["Natural","Man-made"].map(o=><button key={o} style={s.chip(form.substrateCategory===o)} onClick={()=>handleChange("substrateCategory",o)}>{o}</button>)}
+              </div>
+              {form.substrateCategory && <>
+                <label style={s.label}>Substrate Type</label>
+                <select style={s.select} value={form.substrate} onChange={e=>handleChange("substrate",e.target.value)}>
+                  <option value="">Select type...</option>
+                  {substrateOptions.map(sb=><option key={sb} value={sb}>{sb}</option>)}
+                </select>
+              </>}
+              <label style={s.label}>Nest Height (meters)</label>
+              <input style={s.input} type="number" step="0.1" value={form.nestHeight} onChange={e=>handleChange("nestHeight",e.target.value)} placeholder="e.g. 2.5" />
+              <label style={s.label}>Nest Orientation (opening faces)</label>
+              <div style={s.chipRow}>
+                {ORIENTATIONS.map(o=><button key={o} style={s.chip(form.nestOrientation===o)} onClick={()=>handleChange("nestOrientation",o)}>{o}</button>)}
+              </div>
+            </>}
+
+            {/* STEP 6 — Colony */}
+            {step===5 && <>
+              <label style={s.label}>Number of Foundresses</label>
+              <input style={s.input} type="number" min="0" value={form.foundressCount} onChange={e=>handleChange("foundressCount",e.target.value)} placeholder="e.g. 3" />
+              <label style={s.label}>Males Present</label>
+              <div style={s.chipRow}>
+                {["Yes","No","Uncertain"].map(o=><button key={o} style={s.chip(form.malesPresent===o)} onClick={()=>handleChange("malesPresent",o)}>{o}</button>)}
+              </div>
+            </>}
+
+            {/* STEP 7 — Photo & Notes */}
+            {step===6 && <>
+              <label style={s.label}>Nest Photo</label>
+              <input ref={photoRef} type="file" accept="image/*" capture="environment" style={{display:"none"}} onChange={handlePhoto} />
+              {form.photo
+                ? <><img src={form.photo} alt="Nest" style={{width:"100%",borderRadius:10,marginBottom:10,maxHeight:280,objectFit:"cover",border:"1px solid #30363d"}} /><button style={{...s.outlineBtn,marginBottom:16}} onClick={()=>handleChange("photo","")}>🗑 Remove Photo</button></>
+                : <button style={s.gpsBtn} onClick={()=>photoRef.current.click()} disabled={uploading}>{uploading ? "⏳ Uploading..." : "📷 Take / Upload Photo"}</button>
+              }
+              <label style={s.label}>Other Species Nearby</label>
+              <textarea style={s.textarea} value={form.otherSpecies} onChange={e=>handleChange("otherSpecies",e.target.value)} placeholder="e.g. oak tree, ants, Polistes exclamans..." />
+              <label style={s.label}>Additional Notes</label>
+              <textarea style={s.textarea} value={form.notes} onChange={e=>handleChange("notes",e.target.value)} placeholder="Any other observations..." />
+            </>}
+
+            <div style={s.navRow}>
+              <button style={s.navBtn(false)} onClick={()=>{if(step===0)setView("home");else setStep(st=>st-1);}}>{step===0?"Cancel":"← Back"}</button>
+              {step<steps.length-1
+                ? <button style={s.navBtn(true)} onClick={()=>setStep(st=>st+1)}>Next →</button>
+                : <button style={s.navBtn(true)} onClick={submitRecord}>✓ Save Record</button>}
+            </div>
+          </div>
+          {saved && <div style={s.savedBanner}>✓ Record Saved!</div>}
+        </div>
+      );
+
+      // ── LIST ──
+      if (view === "list") return (
+        <div style={s.app}>
+          <div style={s.header}>
+            <span style={{fontSize:24}}>🐝</span>
+            <div><div style={s.headerTitle}>ALL RECORDS</div><div style={s.headerSub}>{records.length} nests logged</div></div>
+          </div>
+          <div style={s.body}>
+            <button style={s.backBtn} onClick={()=>setView("home")}>← Home</button>
+            {records.length===0 && <div style={{color:"#8b949e",textAlign:"center",marginTop:60}}>No records yet.</div>}
+            {records.map(r=>(
+              <div key={r.id} style={s.card} onClick={()=>{setSelectedRecord(r);setView("detail");}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                  <div>
+                    <div style={{fontWeight:700}}>{r.nest_id||r.nestId||"Unnamed Nest"}</div>
+                    {r.species && <div style={{fontSize:11,color:"#8b949e",fontStyle:"italic",marginTop:2}}>{r.species}</div>}
+                  </div>
+                  <span style={{fontSize:11,color:"#8b949e"}}>{r.date}</span>
+                </div>
+                <div style={{marginTop:8}}>
+                  {r.nest_stage && <span style={s.tag}>{r.nest_stage}</span>}
+                  {r.foundress_count && <span style={s.tag}>{r.foundress_count} foundress{r.foundress_count!=="1"?"es":""}</span>}
+                  {r.observer && <span style={s.tag}>👤 {r.observer}</span>}
+                  {r.state && <span style={s.tag}>📌 {r.state}</span>}
+                  {r.image_url && <span style={s.tag}>📷</span>}
+                </div>
+              </div>
+            ))}
+            {records.length>0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ Export All as CSV</button>}
+          </div>
+        </div>
+      );
+
+      // ── DETAIL ──
+      if (view === "detail" && selectedRecord) {
+        const r = selectedRecord;
+        const Row = ({label, value}) => value ? (
+          <div style={{marginBottom:14}}>
+            <div style={s.label}>{label}</div>
+            <div style={{fontSize:15}}>{value}</div>
+          </div>
+        ) : null;
+
+        return (
+          <div style={s.app}>
+            <div style={s.header}>
+              <span style={{fontSize:24}}>🐝</span>
+              <div><div style={s.headerTitle}>{r.nest_id||r.nestId||"Unnamed Nest"}</div><div style={s.headerSub}>{r.date} · {r.time}</div></div>
+            </div>
+            <div style={s.body}>
+              <button style={s.backBtn} onClick={()=>setView("list")}>← All Records</button>
+              {r.image_url && <img src={r.image_url} alt="Nest" style={{width:"100%",borderRadius:10,marginBottom:16,maxHeight:300,objectFit:"cover",border:"1px solid #30363d"}} />}
+
+              <div style={s.sectionCard}>
+                <div style={s.sectionTitle}>🪪 Identification</div>
+                <Row label="Nest ID" value={r.nest_id||r.nestId} />
+                <Row label="Observer" value={r.observer} />
+                <Row label="Date" value={r.date} />
+                <Row label="Time" value={r.time} />
+              </div>
+
+              <div style={s.sectionCard}>
+                <div style={s.sectionTitle}>🔬 Species</div>
+                <Row label="Species" value={r.species} />
+              </div>
+
+              <div style={s.sectionCard}>
+                <div style={s.sectionTitle}>📍 Location</div>
+                <Row label="State" value={r.state} />
+                <Row label="Locality" value={r.locality} />
+                <Row label="GPS" value={r.latitude?`${r.latitude}, ${r.longitude}`:null} />
+                {r.latitude && r.longitude && <a href={`https://maps.google.com/?q=${r.latitude},${r.longitude}`} target="_blank" rel="noreferrer" style={{color:"#58a6ff",fontSize:13,textDecoration:"none",display:"block",marginBottom:10}}>🗺 Open in Google Maps →</a>}
+              </div>
+
+              <div style={s.sectionCard}>
+                <div style={s.sectionTitle}>🪲 Nest Status</div>
+                <Row label="Stage" value={r.nest_stage||r.nestStage} />
+                <Row label="Exposure" value={r.nest_exposure||r.nestExposure} />
+                <Row label="Nest Reuse" value={r.nest_reuse||r.nestReuse} />
+              </div>
+
+              <div style={s.sectionCard}>
+                <div style={s.sectionTitle}>📐 Nest Characteristics</div>
+                <Row label="Substrate Category" value={r.substrate_category||r.substrateCategory} />
+                <Row label="Substrate Type" value={r.substrate} />
+                <Row label="Height" value={r.nest_height?`${r.nest_height} m`:null} />
+                <Row label="Orientation" value={r.nest_orientation||r.nestOrientation} />
+              </div>
+
+              <div style={s.sectionCard}>
+                <div style={s.sectionTitle}>👑 Colony</div>
+                <Row label="Foundresses" value={r.foundress_count||r.foundressCount} />
+                <Row label="Males Present" value={r.males_present||r.malesPresent} />
+              </div>
+
+              {(r.other_species||r.otherSpecies||r.notes) && (
+                <div style={s.sectionCard}>
+                  <div style={s.sectionTitle}>🔍 Notes</div>
+                  <Row label="Other Species" value={r.other_species||r.otherSpecies} />
+                  <Row label="Notes" value={r.notes} />
+                </div>
+              )}
+
+              <button style={{...s.outlineBtn,borderColor:"#da3633",color:"#f85149"}} onClick={()=>{if(window.confirm("Delete this record?"))deleteRecord(r.id);}}>🗑 Delete Record</button>
+            </div>
+          </div>
+        );
+      }
+
+      return null;
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<WaspApp />);
+  </script>
+</body>
+</html>
