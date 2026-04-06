@@ -79,6 +79,14 @@
     };
 
     const PENDING_KEY = "wasp_pending_records";
+    const OBSERVER_KEY = "wasp_observer_name";
+
+    function getSavedObserver() {
+      return localStorage.getItem(OBSERVER_KEY) || "";
+    }
+    function saveObserver(name) {
+      if (name && name.trim()) localStorage.setItem(OBSERVER_KEY, name.trim());
+    }
 
     function getPendingRecords() {
       try { return JSON.parse(localStorage.getItem(PENDING_KEY) || "[]"); }
@@ -144,6 +152,7 @@
       const [uploading, setUploading] = useState(false);
       const [online, setOnline] = useState(navigator.onLine);
       const [syncing, setSyncing] = useState(false);
+      const [errors, setErrors] = useState({});
       const photoRef = useRef();
 
       // Online/offline detection
@@ -278,7 +287,21 @@
         }
       }
 
+      function validateStep(currentStep) {
+        const newErrors = {};
+        if (currentStep === 0) {
+          if (!form.observer.trim()) newErrors.observer = "Observer name is required";
+        }
+        if (currentStep === 2) {
+          if (!form.lat || !form.lng) newErrors.location = "Please capture GPS or enter coordinates";
+          if (!form.state) newErrors.state = "State is required";
+        }
+        setErrors(newErrors);
+        return Object.keys(newErrors).length === 0;
+      }
+
       async function submitRecord() {
+        saveObserver(form.observer);
         const payload = {
           nest_id: form.nestId,
           species: form.species,
@@ -435,7 +458,7 @@
               </div>
             )}
 
-            <button style={s.bigBtn} onClick={()=>{setForm({...FIELDS, nestId: generateNestId(records)});setStep(0);setView("new");}}>＋ &nbsp;New Nest Record</button>
+            <button style={s.bigBtn} onClick={()=>{setForm({...FIELDS, nestId: generateNestId(records), observer: getSavedObserver()});setStep(0);setErrors({});setView("new");}}>＋ &nbsp;New Nest Record</button>
             <button style={s.outlineBtn} onClick={()=>setView("list")}>📋 &nbsp;View All Records ({allRecordsCount})</button>
             {allRecordsCount > 0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ &nbsp;Export CSV</button>}
 
@@ -493,8 +516,14 @@
             {step===0 && <>
               <label style={s.label}>Nest ID <span style={s.liveBadge}>AUTO</span></label>
               <div style={{...s.liveBox, letterSpacing:4, marginBottom:16}}>{form.nestId}</div>
-              <label style={s.label}>Observer Name</label>
-              <input style={s.input} value={form.observer} onChange={e=>handleChange("observer",e.target.value)} placeholder="Your full name" />
+              <label style={s.label}>Observer Name <span style={{color:"#f85149"}}>*</span></label>
+              <input
+                style={{...s.input, borderColor: errors.observer ? "#f85149" : "#30363d"}}
+                value={form.observer}
+                onChange={e=>{ handleChange("observer",e.target.value); if(errors.observer) setErrors(ev=>({...ev,observer:""})); }}
+                placeholder="Your full name"
+              />
+              {errors.observer && <div style={{color:"#f85149",fontSize:12,marginTop:-12,marginBottom:12}}>⚠ {errors.observer}</div>}
               <LiveField value={form.date} label="Date" />
               <LiveField value={form.time} label="Time" />
             </>}
@@ -516,17 +545,19 @@
 
             {step===2 && <>
               <button style={s.gpsBtn} onClick={getGPS}>{gpsLoading ? "⏳ Getting GPS..." : "📍 Capture GPS + Auto-locality"}</button>
-              <label style={s.label}>Latitude</label>
-              <input style={s.input} value={form.lat} onChange={e=>handleChange("lat",e.target.value)} placeholder="Auto-filled or type manually" />
-              <label style={s.label}>Longitude</label>
-              <input style={s.input} value={form.lng} onChange={e=>handleChange("lng",e.target.value)} placeholder="Auto-filled or type manually" />
+              <label style={s.label}>Latitude <span style={{color:"#f85149"}}>*</span></label>
+              <input style={{...s.input, borderColor: errors.location ? "#f85149" : "#30363d"}} value={form.lat} onChange={e=>{ handleChange("lat",e.target.value); setErrors(ev=>({...ev,location:""})); }} placeholder="Auto-filled or type manually" />
+              <label style={s.label}>Longitude <span style={{color:"#f85149"}}>*</span></label>
+              <input style={{...s.input, borderColor: errors.location ? "#f85149" : "#30363d"}} value={form.lng} onChange={e=>{ handleChange("lng",e.target.value); setErrors(ev=>({...ev,location:""})); }} placeholder="Auto-filled or type manually" />
+              {errors.location && <div style={{color:"#f85149",fontSize:12,marginTop:-12,marginBottom:12}}>⚠ {errors.location}</div>}
               <label style={s.label}>Locality {localityLoading && <span style={{color:"#58a6ff",fontSize:10}}>⏳ looking up...</span>}</label>
               <input style={s.input} value={form.locality} onChange={e=>handleChange("locality",e.target.value)} placeholder="Auto-filled or type manually" />
-              <label style={s.label}>State</label>
-              <select style={s.select} value={form.state} onChange={e=>handleChange("state",e.target.value)}>
+              <label style={s.label}>State <span style={{color:"#f85149"}}>*</span></label>
+              <select style={{...s.select, borderColor: errors.state ? "#f85149" : "#30363d"}} value={form.state} onChange={e=>{ handleChange("state",e.target.value); setErrors(ev=>({...ev,state:""})); }}>
                 <option value="">Select state...</option>
                 {US_STATES.map(st=><option key={st} value={st}>{st}</option>)}
               </select>
+              {errors.state && <div style={{color:"#f85149",fontSize:12,marginTop:-12,marginBottom:12}}>⚠ {errors.state}</div>}
             </>}
 
             {step===3 && <>
@@ -594,7 +625,7 @@
             <div style={s.navRow}>
               <button style={s.navBtn(false)} onClick={()=>{if(step===0)setView("home");else setStep(st=>st-1);}}>{step===0?"Cancel":"← Back"}</button>
               {step<steps.length-1
-                ? <button style={s.navBtn(true)} onClick={()=>setStep(st=>st+1)}>Next →</button>
+                ? <button style={s.navBtn(true)} onClick={()=>{ if(validateStep(step)) setStep(st=>st+1); }}>Next →</button>
                 : <button style={s.navBtn(true)} onClick={submitRecord}>{online ? "✓ Save Record" : "⚡ Save Offline"}</button>}
             </div>
           </div>
