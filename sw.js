@@ -25,7 +25,7 @@ self.addEventListener('fetch', event => {
   // Only intercept GETs
   if (event.request.method !== 'GET') return;
 
-  // Never intercept Supabase or external APIs — let them go straight to network
+  // Never intercept Supabase or external APIs - let them go straight to network
   if (event.request.url.includes('supabase.co')) return;
   if (event.request.url.includes('nominatim.openstreetmap.org')) return;
 
