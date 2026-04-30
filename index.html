@@ -9,14 +9,10 @@
   <meta name="apple-mobile-web-app-title" content="Wasp Field Log" />
   <title>Wasp Field Log</title>
 
-  <!-- PWA Manifest -->
   <link rel="manifest" href="manifest.json" />
-
-  <!-- iOS icon -->
   <link rel="apple-touch-icon" href="icon-192.png" />
-
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  
+
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     const SUPABASE_URL = "https://lchpzmneyjpurbnnpvny.supabase.co";
@@ -24,14 +20,11 @@
     const { createClient } = supabase;
     const _supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    // Register Service Worker
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('sw.js')
           .then(reg => console.log('SW registered:', reg.scope))
           .catch(err => console.log('SW failed:', err));
-
-        // Listen for sync messages from SW
         navigator.serviceWorker.addEventListener('message', event => {
           if (event.data && event.data.type === 'SYNC_PENDING') {
             window.dispatchEvent(new Event('syncPending'));
@@ -39,8 +32,6 @@
         });
       });
     }
-
-    // Offline detection
     function isOnline() { return navigator.onLine; }
   </script>
 
@@ -66,7 +57,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
   <script type="text/babel">
-    const { useState, useEffect, useRef, useCallback } = React;
+    const { useState, useEffect, useRef } = React;
 
     const FIELDS = {
       nestId: "", date: "", time: "", observer: "",
@@ -81,20 +72,12 @@
     const PENDING_KEY = "wasp_pending_records";
     const OBSERVER_KEY = "wasp_observer_name";
 
-    function getSavedObserver() {
-      return localStorage.getItem(OBSERVER_KEY) || "";
-    }
-    function saveObserver(name) {
-      if (name && name.trim()) localStorage.setItem(OBSERVER_KEY, name.trim());
-    }
-
+    function getSavedObserver() { return localStorage.getItem(OBSERVER_KEY) || ""; }
+    function saveObserver(name) { if (name && name.trim()) localStorage.setItem(OBSERVER_KEY, name.trim()); }
     function getPendingRecords() {
-      try { return JSON.parse(localStorage.getItem(PENDING_KEY) || "[]"); }
-      catch { return []; }
+      try { return JSON.parse(localStorage.getItem(PENDING_KEY) || "[]"); } catch { return []; }
     }
-    function savePendingRecords(records) {
-      localStorage.setItem(PENDING_KEY, JSON.stringify(records));
-    }
+    function savePendingRecords(records) { localStorage.setItem(PENDING_KEY, JSON.stringify(records)); }
     function addPendingRecord(record) {
       const pending = getPendingRecords();
       pending.push({ ...record, _localId: Date.now(), _pending: true });
@@ -153,9 +136,10 @@
       const [online, setOnline] = useState(navigator.onLine);
       const [syncing, setSyncing] = useState(false);
       const [errors, setErrors] = useState({});
+      const [verifyResult, setVerifyResult] = useState(null);
+      const [verifying, setVerifying] = useState(false);
       const photoRef = useRef();
 
-      // Online/offline detection
       useEffect(() => {
         const goOnline = () => setOnline(true);
         const goOffline = () => setOnline(false);
@@ -164,14 +148,10 @@
         return () => { window.removeEventListener('online', goOnline); window.removeEventListener('offline', goOffline); };
       }, []);
 
-      // Auto-sync when back online
       useEffect(() => {
-        if (online && getPendingRecords().length > 0) {
-          syncPending();
-        }
+        if (online && getPendingRecords().length > 0) syncPending();
       }, [online]);
 
-      // Listen for SW sync message
       useEffect(() => {
         const handler = () => syncPending();
         window.addEventListener('syncPending', handler);
@@ -193,27 +173,51 @@
         }
       }
 
+      // FIXED: checks if record exists before re-inserting; cleans zombies automatically
       async function syncPending() {
-  const pending = getPendingRecords();
-  if (!pending.length || syncing) return;
-  setSyncing(true);
-  let synced = 0;
-  for (const record of pending) {
-    try {
-      const { _localId, _pending, ...payload } = record;
-      const { error } = await _supabase.from('wasp_observations').insert([payload]);
-      if (!error) {
-        removePendingRecord(_localId);
-        synced++;
+        const pending = getPendingRecords();
+        if (!pending.length || syncing) return;
+        setSyncing(true);
+        let changed = 0;
+
+        for (const record of pending) {
+          const { _localId, _pending, ...payload } = record;
+
+          // Check if this nest_id is already in the database
+          const { data: existing, error: checkErr } = await _supabase
+            .from('wasp_observations')
+            .select('nest_id')
+            .eq('nest_id', payload.nest_id)
+            .maybeSingle();
+
+          if (checkErr) {
+            console.error("Check failed for", payload.nest_id, checkErr);
+            continue;
+          }
+
+          if (existing) {
+            // Already in DB - zombie, just remove from pending
+            removePendingRecord(_localId);
+            changed++;
+            continue;
+          }
+
+          // Real unsynced record - insert it
+          const { error: insertErr } = await _supabase.from('wasp_observations').insert([payload]);
+          if (!insertErr) {
+            removePendingRecord(_localId);
+            changed++;
+          } else {
+            console.error("Sync failed for", payload.nest_id, insertErr);
+          }
+        }
+
+        if (changed > 0) {
+          setPendingRecords(getPendingRecords());
+          fetchRecords();
+        }
+        setSyncing(false);
       }
-    } catch {}
-  }
-  if (synced > 0) {
-    setPendingRecords(getPendingRecords());
-    fetchRecords();
-  }
-  setSyncing(false);
-}
 
       useEffect(() => {
         if (view !== "new") return;
@@ -265,7 +269,6 @@
         const file = e.target.files[0];
         if (!file) return;
         if (!online) {
-          // Store photo as base64 locally when offline
           const reader = new FileReader();
           reader.onload = () => handleChange("photo", reader.result);
           reader.readAsDataURL(file);
@@ -300,34 +303,24 @@
         return Object.keys(newErrors).length === 0;
       }
 
+      // FIXED: verifies the record is actually in the database before showing "Saved!"
       async function submitRecord() {
         saveObserver(form.observer);
         const payload = {
-          nest_id: form.nestId,
-          species: form.species,
-          observer: form.observer,
-          date: form.date,
-          time: form.time,
-          latitude: parseFloat(form.lat) || null,
-          longitude: parseFloat(form.lng) || null,
-          locality: form.locality,
-          state: form.state,
-          nest_orientation: form.nestOrientation,
-          nest_stage: form.nestStage,
-          nest_exposure: form.nestExposure,
-          nest_reuse: form.nestReuse,
-          substrate_category: form.substrateCategory,
-          substrate: form.substrate,
+          nest_id: form.nestId, species: form.species, observer: form.observer,
+          date: form.date, time: form.time,
+          latitude: parseFloat(form.lat) || null, longitude: parseFloat(form.lng) || null,
+          locality: form.locality, state: form.state,
+          nest_orientation: form.nestOrientation, nest_stage: form.nestStage,
+          nest_exposure: form.nestExposure, nest_reuse: form.nestReuse,
+          substrate_category: form.substrateCategory, substrate: form.substrate,
           nest_height: parseFloat(form.nestHeight) || null,
           foundress_count: parseInt(form.foundressCount) || null,
-          males_present: form.malesPresent,
-          other_species: form.otherSpecies,
-          notes: form.notes,
-          image_url: form.photo
+          males_present: form.malesPresent, other_species: form.otherSpecies,
+          notes: form.notes, image_url: form.photo
         };
 
         if (!online) {
-          // Save locally
           addPendingRecord(payload);
           setPendingRecords(getPendingRecords());
           setSavedOffline(true);
@@ -336,13 +329,28 @@
         }
 
         try {
-          const { error } = await _supabase.from('wasp_observations').insert([payload]);
-          if (error) throw error;
+          // Step 1: insert
+          const { error: insertErr } = await _supabase.from('wasp_observations').insert([payload]);
+          if (insertErr) throw insertErr;
+
+          // Step 2: VERIFY the record actually exists in the database
+          const { data: verified, error: verifyErr } = await _supabase
+            .from('wasp_observations')
+            .select('nest_id')
+            .eq('nest_id', payload.nest_id)
+            .maybeSingle();
+
+          if (verifyErr || !verified) {
+            // Insert claimed success but verification failed - keep in pending
+            throw new Error("Could not verify record was saved");
+          }
+
+          // Verified! Real success.
           setSaved(true);
           fetchRecords();
           setTimeout(() => { setSaved(false); setForm({...FIELDS}); setStep(0); setView("home"); }, 1500);
         } catch (err) {
-          // Fallback to local save if Supabase fails
+          console.error("Submit failed:", err);
           addPendingRecord(payload);
           setPendingRecords(getPendingRecords());
           setSavedOffline(true);
@@ -350,12 +358,20 @@
         }
       }
 
+      // FIXED: only exports database records, never pending. Refuses if pending exist.
       function exportCSV() {
-        const allData = [...records, ...pendingRecords.map(r => ({...r, nest_id: r.nest_id, _PENDING: true}))];
-        if (!allData.length) return;
-        const keys = Object.keys(records[0] || allData[0]).filter(k => k !== "id" && k !== "created_at" && k !== "_localId" && k !== "_pending");
+        if (pendingRecords.length > 0) {
+          alert(
+            `⚠️ You have ${pendingRecords.length} unsynced record${pendingRecords.length>1?"s":""} on this device.\n\n` +
+            `For data integrity, the export only includes records confirmed in the database.\n\n` +
+            `Tap "Check My Data" first to sync any unsynced records, then export again.`
+          );
+          return;
+        }
+        if (!records.length) return;
+        const keys = Object.keys(records[0]).filter(k => k !== "id" && k !== "created_at");
         const header = keys.join(",");
-        const rows = allData.map(r =>
+        const rows = records.map(r =>
           keys.map(k => {
             let val = r[k] === null || r[k] === undefined ? "" : r[k];
             return `"${val.toString().replace(/"/g, '""')}"`;
@@ -366,9 +382,46 @@
         const a = document.createElement("a");
         a.setAttribute("href", uri);
         a.setAttribute("download", `wasp_data_${new Date().toISOString().split("T")[0]}.csv`);
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      }
+
+      // NEW: Data integrity check - tells user exactly what's on their device vs database
+      async function checkMyData() {
+        setVerifying(true);
+        setVerifyResult(null);
+        const pending = getPendingRecords();
+        const result = { zombies: [], real: [], errored: [] };
+
+        for (const r of pending) {
+          try {
+            const { data: existing } = await _supabase
+              .from('wasp_observations')
+              .select('nest_id')
+              .eq('nest_id', r.nest_id)
+              .maybeSingle();
+            if (existing) result.zombies.push(r);
+            else result.real.push(r);
+          } catch (e) {
+            result.errored.push(r);
+          }
+        }
+
+        // Auto-clean zombies
+        if (result.zombies.length > 0) {
+          const zombieIds = new Set(result.zombies.map(z => z._localId));
+          const remaining = pending.filter(r => !zombieIds.has(r._localId));
+          savePendingRecords(remaining);
+          setPendingRecords(remaining);
+        }
+
+        // Try to sync real ones
+        if (result.real.length > 0) {
+          await syncPending();
+        }
+
+        setVerifyResult(result);
+        setVerifying(false);
+        await fetchRecords();
       }
 
       const steps = [
@@ -389,6 +442,7 @@
         body: { padding:"20px 16px", paddingBottom:100 },
         bigBtn: { width:"100%", padding:"18px 24px", background:"#238636", color:"#fff", border:"none", borderRadius:10, fontSize:15, fontFamily:"'DM Mono',monospace", fontWeight:700, letterSpacing:1, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:10, marginBottom:12 },
         outlineBtn: { width:"100%", padding:"16px 24px", background:"transparent", color:"#58a6ff", border:"1px solid #30363d", borderRadius:10, fontSize:14, fontFamily:"'DM Mono',monospace", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8, marginBottom:12 },
+        verifyBtn: { width:"100%", padding:"16px 24px", background:"transparent", color:"#3fb950", border:"1px solid #238636", borderRadius:10, fontSize:14, fontFamily:"'DM Mono',monospace", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", gap:8, marginBottom:12 },
         card: { background:"#161b22", border:"1px solid #30363d", borderRadius:10, padding:"14px 16px", marginBottom:10, cursor:"pointer" },
         pendingCard: { background:"#1a1200", border:"1px solid #b45309", borderRadius:10, padding:"14px 16px", marginBottom:10, cursor:"pointer" },
         label: { fontSize:11, color:"#8b949e", letterSpacing:1, textTransform:"uppercase", marginBottom:6, display:"block" },
@@ -415,6 +469,8 @@
         sectionCard: { background:"#161b22", border:"1px solid #30363d", borderRadius:10, padding:16, marginBottom:16 },
         sectionTitle: { fontSize:11, color:"#8b949e", textTransform:"uppercase", letterSpacing:1, marginBottom:12 },
         liveBadge: { display:"inline-block", background:"#0d3118", color:"#3fb950", fontSize:9, padding:"2px 7px", borderRadius:20, border:"1px solid #238636", marginLeft:8, letterSpacing:1, verticalAlign:"middle" },
+        verifyBox: { background:"#0d1f0d", border:"1px solid #238636", borderRadius:10, padding:14, marginBottom:16, fontSize:12, color:"#3fb950" },
+        verifyBoxBad: { background:"#2d1117", border:"1px solid #f85149", borderRadius:10, padding:14, marginBottom:16, fontSize:12, color:"#f85149" },
       };
 
       const LiveField = ({value, label}) => (
@@ -427,7 +483,8 @@
       const substrateOptions = form.substrateCategory === "Natural" ? NATURAL_SUBSTRATES :
                                form.substrateCategory === "Man-made" ? MANMADE_SUBSTRATES : [];
       const today = new Date().toISOString().split("T")[0];
-      const allRecordsCount = records.length + pendingRecords.length;
+      // FIXED: count is now database truth, with separate display for pending
+      const databaseCount = records.length;
 
       // ── HOME ──
       if (view === "home") return (
@@ -447,35 +504,35 @@
           </div>
           <div style={s.body}>
             <div style={s.statsRow}>
-              <div style={s.statBox}><div style={s.statNum}>{allRecordsCount}</div><div style={s.statLabel}>Nests</div></div>
+              <div style={s.statBox}><div style={s.statNum}>{databaseCount}</div><div style={s.statLabel}>In Database</div></div>
               <div style={s.statBox}><div style={s.statNum}>{records.filter(r=>r.date===today).length}</div><div style={s.statLabel}>Today</div></div>
               <div style={s.statBox}><div style={s.statNum}>{records.reduce((sum,r)=>sum+(parseInt(r.foundress_count)||0),0)}</div><div style={s.statLabel}>Foundresses</div></div>
             </div>
 
             {pendingRecords.length > 0 && (
               <div style={{background:"#1a1200",border:"1px solid #b45309",borderRadius:10,padding:12,marginBottom:16,fontSize:12,color:"#f0883e"}}>
-                ⚠️ {pendingRecords.length} record{pendingRecords.length>1?"s":""} saved offline, waiting to sync to database.
+                ⚠️ {pendingRecords.length} record{pendingRecords.length>1?"s":""} on this device not yet confirmed in database. Tap "Check My Data" below.
+              </div>
+            )}
+
+            {verifyResult && (
+              <div style={verifyResult.real.length > 0 || verifyResult.errored.length > 0 ? s.verifyBoxBad : s.verifyBox}>
+                <div style={{fontWeight:700, marginBottom:6}}>📊 Data Integrity Check</div>
+                {verifyResult.zombies.length > 0 && <div>✓ Cleaned {verifyResult.zombies.length} duplicate record{verifyResult.zombies.length>1?"s":""} (already in database)</div>}
+                {verifyResult.real.length > 0 && <div>↑ Synced {verifyResult.real.length} unsynced record{verifyResult.real.length>1?"s":""} to database</div>}
+                {verifyResult.errored.length > 0 && <div>⚠ {verifyResult.errored.length} record{verifyResult.errored.length>1?"s":""} could not be checked (network issue)</div>}
+                {verifyResult.zombies.length === 0 && verifyResult.real.length === 0 && verifyResult.errored.length === 0 && <div>✓ All your records are confirmed in the database!</div>}
               </div>
             )}
 
             <button style={s.bigBtn} onClick={()=>{setForm({...FIELDS, nestId: generateNestId(records), observer: getSavedObserver()});setStep(0);setErrors({});setView("new");}}>＋ &nbsp;New Nest Record</button>
-            <button style={s.outlineBtn} onClick={()=>setView("list")}>📋 &nbsp;View All Records ({allRecordsCount})</button>
-            {allRecordsCount > 0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ &nbsp;Export CSV</button>}
+            <button style={s.outlineBtn} onClick={()=>setView("list")}>📋 &nbsp;View All Records ({databaseCount}{pendingRecords.length>0?` + ${pendingRecords.length} pending`:""})</button>
+            {online && <button style={s.verifyBtn} onClick={checkMyData} disabled={verifying}>{verifying ? "⏳ Checking..." : "🔍 Check My Data"}</button>}
+            {databaseCount > 0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ &nbsp;Export CSV (Database Only)</button>}
 
-            {(records.length > 0 || pendingRecords.length > 0) && <>
+            {records.length > 0 && <>
               <div style={{fontSize:11,color:"#8b949e",textTransform:"uppercase",letterSpacing:1,marginTop:20,marginBottom:12}}>Recent Records</div>
-              {pendingRecords.slice(0,2).map(r=>(
-                <div key={r._localId} style={s.pendingCard}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                    <div>
-                      <div style={{fontWeight:700,fontSize:14,color:"#f0883e"}}>{r.nest_id} <span style={{fontSize:10,color:"#b45309"}}>⏳ PENDING</span></div>
-                      {r.species && <div style={{fontSize:11,color:"#8b949e",fontStyle:"italic",marginTop:2}}>{r.species}</div>}
-                    </div>
-                    <span style={{fontSize:11,color:"#8b949e"}}>{r.date}</span>
-                  </div>
-                </div>
-              ))}
-              {records.slice(0,3).map(r=>(
+              {records.slice(0,5).map(r=>(
                 <div key={r.id} style={s.card} onClick={()=>{setSelectedRecord(r);setView("detail");}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                     <div>
@@ -629,8 +686,8 @@
                 : <button style={s.navBtn(true)} onClick={submitRecord}>{online ? "✓ Save Record" : "⚡ Save Offline"}</button>}
             </div>
           </div>
-          {saved && <div style={s.savedBanner}>✓ Record Saved!</div>}
-          {savedOffline && <div style={s.offlineBanner}>⚡ Saved Locally!{"\n"}Will sync when online.</div>}
+          {saved && <div style={s.savedBanner}>✓ Verified in Database!</div>}
+          {savedOffline && <div style={s.offlineBanner}>⚡ Saved Locally!{"\n"}Tap Check My Data when online.</div>}
         </div>
       );
 
@@ -639,7 +696,7 @@
         <div style={s.app}>
           <div style={s.header}>
             <span style={{fontSize:24}}>🐝</span>
-            <div><div style={s.headerTitle}>ALL RECORDS</div><div style={s.headerSub}>{allRecordsCount} nests logged</div></div>
+            <div><div style={s.headerTitle}>ALL RECORDS</div><div style={s.headerSub}>{databaseCount} in database{pendingRecords.length>0?`, ${pendingRecords.length} pending`:""}</div></div>
           </div>
           <div style={s.body}>
             <button style={s.backBtn} onClick={()=>setView("home")}>← Home</button>
@@ -651,13 +708,13 @@
                     <div style={{fontWeight:700,color:"#f0883e"}}>{r.nest_id}</div>
                     <span style={{fontSize:11,color:"#8b949e"}}>{r.date}</span>
                   </div>
-                  <div style={{marginTop:6}}><span style={s.pendingTag}>⏳ Not yet synced</span>{r.species && <span style={s.pendingTag}>{r.species}</span>}</div>
+                  <div style={{marginTop:6}}><span style={s.pendingTag}>⏳ Not yet confirmed in database</span>{r.species && <span style={s.pendingTag}>{r.species}</span>}</div>
                 </div>
               ))}
               <div style={{marginBottom:16}} />
             </>}
             {records.length===0 && pendingRecords.length===0 && <div style={{color:"#8b949e",textAlign:"center",marginTop:60}}>No records yet.</div>}
-            {records.length > 0 && <div style={{fontSize:11,color:"#8b949e",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Synced Records ({records.length})</div>}
+            {records.length > 0 && <div style={{fontSize:11,color:"#8b949e",textTransform:"uppercase",letterSpacing:1,marginBottom:8}}>Confirmed in Database ({records.length})</div>}
             {records.map(r=>(
               <div key={r.id} style={s.card} onClick={()=>{setSelectedRecord(r);setView("detail");}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
@@ -676,7 +733,7 @@
                 </div>
               </div>
             ))}
-            {allRecordsCount > 0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ Export All as CSV</button>}
+            {databaseCount > 0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ Export Database as CSV</button>}
           </div>
         </div>
       );
