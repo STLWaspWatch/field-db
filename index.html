@@ -194,26 +194,26 @@
       }
 
       async function syncPending() {
-        const pending = getPendingRecords();
-        if (!pending.length || syncing) return;
-        setSyncing(true);
-        let synced = 0;
-        for (const record of pending) {
-          try {
-            const { _localId, _pending, ...payload } = record;
-            const { error } = await _supabase.from('wasp_observations').insert([payload]);
-            if (!error) {
-              removePendingRecord(_localId);
-              synced++;
-            }
-          } catch {}
-        }
-        if (synced > 0) {
-          setPendingRecords(getPendingRecords());
-          fetchRecords();
-        }
-        setSyncing(false);
+  const pending = getPendingRecords();
+  if (!pending.length || syncing) return;
+  setSyncing(true);
+  let synced = 0;
+  for (const record of pending) {
+    try {
+      const { _localId, _pending, ...payload } = record;
+      const { error } = await _supabase.from('wasp_observations').insert([payload]);
+      if (!error) {
+        removePendingRecord(_localId);
+        synced++;
       }
+    } catch {}
+  }
+  if (synced > 0) {
+    setPendingRecords(getPendingRecords());
+    fetchRecords();
+  }
+  setSyncing(false);
+}
 
       useEffect(() => {
         if (view !== "new") return;
