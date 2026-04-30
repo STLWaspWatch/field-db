@@ -1,4 +1,4 @@
-const CACHE_NAME = 'wasp-field-log-v1';
+const CACHE_NAME = 'wasp-field-log-v2';
 const ASSETS = [
   '/field-db/',
   '/field-db/index.html',
@@ -7,15 +7,11 @@ const ASSETS = [
   '/field-db/icon-512.png',
 ];
 
-// Install — cache all assets
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS))
-  );
+  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS)));
   self.skipWaiting();
 });
 
-// Activate — clean up old caches
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys =>
@@ -25,38 +21,28 @@ self.addEventListener('activate', event => {
   self.clients.claim();
 });
 
-// Fetch — serve from cache, fall back to network
 self.addEventListener('fetch', event => {
-  // For Supabase API calls — always try network first, no caching
-  if (event.request.url.includes('supabase.co')) {
-    event.respondWith(
-      fetch(event.request).catch(() => {
-        // If network fails (offline), return a custom offline response for API calls
-        return new Response(
-          JSON.stringify({ error: 'offline', message: 'You are offline. Record saved locally.' }),
-          { headers: { 'Content-Type': 'application/json' } }
-        );
-      })
-    );
-    return;
-  }
+  // Only intercept GETs
+  if (event.request.method !== 'GET') return;
 
-  // For everything else — cache first, then network
+  // Never intercept Supabase or external APIs — let them go straight to network
+  if (event.request.url.includes('supabase.co')) return;
+  if (event.request.url.includes('nominatim.openstreetmap.org')) return;
+
+  // Cache-first for everything else (your app shell)
   event.respondWith(
     caches.match(event.request).then(cached => {
       return cached || fetch(event.request).then(response => {
-        // Cache new successful responses
-        if (response.status === 200) {
+        if (response.status === 200 && event.request.url.startsWith(self.location.origin)) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
         }
         return response;
-      });
+      }).catch(() => cached);
     })
   );
 });
 
-// Listen for sync events (background sync when back online)
 self.addEventListener('sync', event => {
   if (event.tag === 'sync-wasp-records') {
     event.waitUntil(syncPendingRecords());
@@ -64,10 +50,6 @@ self.addEventListener('sync', event => {
 });
 
 async function syncPendingRecords() {
-  // This is triggered when back online
-  // The main app handles the actual sync via localStorage
   const clients = await self.clients.matchAll();
-  clients.forEach(client => {
-    client.postMessage({ type: 'SYNC_PENDING' });
-  });
+  clients.forEach(client => client.postMessage({ type: 'SYNC_PENDING' }));
 }
