@@ -60,7 +60,7 @@
     const { useState, useEffect, useRef } = React;
 
     const FIELDS = {
-      nestId: "", date: "", time: "", observer: "",
+      nestId: "", clientUuid: "", date: "", time: "", observer: "",
       species: "",
       lat: "", lng: "", locality: "", state: "", nestOrientation: "",
       nestStage: "", nestExposure: "", nestReuse: "",
@@ -72,20 +72,91 @@
     const PENDING_KEY = "wasp_pending_records";
     const OBSERVER_KEY = "wasp_observer_name";
 
+    // Stable per-record identity. Used to dedup across devices so two offline
+    // observers who both generate the same human label (e.g. NEST-007) never
+    // collide or overwrite each other. crypto.randomUUID needs a secure context
+    // (https) — GitHub Pages qualifies — with a fallback just in case.
+    // Parse numbers without throwing away a real zero. `parseInt(x) || null`
+    // turns a measured 0 (0 m height, 0 foundresses) into null because 0 is
+    // falsy — these keep 0 and return null only for blank/invalid input.
+    function toIntOrNull(v) {
+      const s = String(v == null ? "" : v).trim();
+      if (s === "") return null;
+      const n = parseInt(s, 10);
+      return Number.isNaN(n) ? null : n;
+    }
+    function toFloatOrNull(v) {
+      const s = String(v == null ? "" : v).trim();
+      if (s === "") return null;
+      const n = parseFloat(s);
+      return Number.isNaN(n) ? null : n;
+    }
+
+    function genUUID() {
+      if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+      return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+        const r = Math.random() * 16 | 0, v = c === "x" ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+      });
+    }
+
     function getSavedObserver() { return localStorage.getItem(OBSERVER_KEY) || ""; }
     function saveObserver(name) { if (name && name.trim()) localStorage.setItem(OBSERVER_KEY, name.trim()); }
     function getPendingRecords() {
       try { return JSON.parse(localStorage.getItem(PENDING_KEY) || "[]"); } catch { return []; }
     }
-    function savePendingRecords(records) { localStorage.setItem(PENDING_KEY, JSON.stringify(records)); }
+    // Returns true on success, false if the device storage quota is exceeded.
+    function savePendingRecords(records) {
+      try { localStorage.setItem(PENDING_KEY, JSON.stringify(records)); return true; }
+      catch (e) { console.error("Failed to write pending records (storage full?)", e); return false; }
+    }
+    // Returns true on success, false if the write failed (e.g. storage full).
     function addPendingRecord(record) {
       const pending = getPendingRecords();
       pending.push({ ...record, _localId: Date.now(), _pending: true });
-      savePendingRecords(pending);
+      return savePendingRecords(pending);
     }
     function removePendingRecord(localId) {
       const pending = getPendingRecords().filter(r => r._localId !== localId);
       savePendingRecords(pending);
+    }
+
+    // Downscale + re-encode an offline photo so a full-res capture doesn't blow
+    // the ~5 MB localStorage quota while waiting to sync. 2048px long edge at
+    // q0.9 keeps habitat/nest detail but lands well under ~1 MB in practice.
+    function compressImageFile(file, maxEdge, quality) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const img = new Image();
+          img.onload = () => {
+            const scale = Math.min(1, maxEdge / Math.max(img.width, img.height));
+            const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+            resolve(canvas.toDataURL("image/jpeg", quality));
+          };
+          img.onerror = reject;
+          img.src = reader.result;
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+    }
+
+    // Upload a base64 data URL (an offline-captured photo) to Supabase Storage
+    // and return its public URL, so synced rows hold a real URL — not a giant
+    // data: string sitting in the database and the CSV export.
+    async function uploadDataUrl(dataUrl) {
+      const blob = await (await fetch(dataUrl)).blob();
+      const ext = (blob.type.split("/")[1] || "jpg").replace("jpeg", "jpg");
+      const fileName = `${Date.now()}_${Math.random().toString(36).slice(2, 9)}.${ext}`;
+      const filePath = `observations/${fileName}`;
+      const { error } = await _supabase.storage.from("wasp-photos").upload(filePath, blob, { contentType: blob.type });
+      if (error) throw error;
+      const { data: { publicUrl } } = _supabase.storage.from("wasp-photos").getPublicUrl(filePath);
+      return publicUrl;
     }
 
     function generateNestId(records) {
@@ -173,7 +244,9 @@
         }
       }
 
-      // FIXED: checks if record exists before re-inserting; cleans zombies automatically
+      // FIXED: dedup on the unique client_uuid (not nest_id), so a colliding
+      // human label from another device is never silently discarded as a
+      // "duplicate". Offline photos (data: URLs) are pushed to Storage first.
       async function syncPending() {
         const pending = getPendingRecords();
         if (!pending.length || syncing) return;
@@ -183,26 +256,42 @@
         for (const record of pending) {
           const { _localId, _pending, ...payload } = record;
 
-          // Check if this nest_id is already in the database
-          const { data: existing, error: checkErr } = await _supabase
-            .from('wasp_observations')
-            .select('nest_id')
-            .eq('nest_id', payload.nest_id)
-            .maybeSingle();
-
-          if (checkErr) {
+          // Is THIS exact record already in the DB? Identify it by client_uuid.
+          // Legacy pending records saved before this update have no uuid — fall
+          // back to the old nest_id check for those only.
+          let existing = null;
+          try {
+            if (payload.client_uuid) {
+              const { data } = await _supabase
+                .from('wasp_observations').select('client_uuid')
+                .eq('client_uuid', payload.client_uuid).maybeSingle();
+              existing = data;
+            } else {
+              const { data } = await _supabase
+                .from('wasp_observations').select('nest_id')
+                .eq('nest_id', payload.nest_id).maybeSingle();
+              existing = data;
+            }
+          } catch (checkErr) {
             console.error("Check failed for", payload.nest_id, checkErr);
             continue;
           }
 
           if (existing) {
-            // Already in DB - zombie, just remove from pending
+            // Genuinely this record, already synced - drop from pending.
             removePendingRecord(_localId);
             changed++;
             continue;
           }
 
-          // Real unsynced record - insert it
+          // Real unsynced record. Upload an offline photo before inserting so the
+          // row never carries a raw data: URL. On upload failure, leave it pending
+          // and retry next time rather than writing a bad row.
+          if (payload.image_url && payload.image_url.startsWith("data:")) {
+            try { payload.image_url = await uploadDataUrl(payload.image_url); }
+            catch (e) { console.error("Photo upload failed; will retry", payload.nest_id, e); continue; }
+          }
+
           const { error: insertErr } = await _supabase.from('wasp_observations').insert([payload]);
           if (!insertErr) {
             removePendingRecord(_localId);
@@ -269,9 +358,15 @@
         const file = e.target.files[0];
         if (!file) return;
         if (!online) {
-          const reader = new FileReader();
-          reader.onload = () => handleChange("photo", reader.result);
-          reader.readAsDataURL(file);
+          // Offline: downscale so the data URL fits localStorage, then keep it
+          // locally. syncPending() uploads it to Storage when back online.
+          try {
+            handleChange("photo", await compressImageFile(file, 2048, 0.9));
+          } catch {
+            const reader = new FileReader();
+            reader.onload = () => handleChange("photo", reader.result);
+            reader.readAsDataURL(file);
+          }
           return;
         }
         setUploading(true);
@@ -307,37 +402,52 @@
       async function submitRecord() {
         saveObserver(form.observer);
         const payload = {
-          nest_id: form.nestId, species: form.species, observer: form.observer,
+          nest_id: form.nestId, client_uuid: form.clientUuid || genUUID(),
+          species: form.species, observer: form.observer,
           date: form.date, time: form.time,
           latitude: parseFloat(form.lat) || null, longitude: parseFloat(form.lng) || null,
           locality: form.locality, state: form.state,
           nest_orientation: form.nestOrientation, nest_stage: form.nestStage,
           nest_exposure: form.nestExposure, nest_reuse: form.nestReuse,
           substrate_category: form.substrateCategory, substrate: form.substrate,
-          nest_height: parseFloat(form.nestHeight) || null,
-          foundress_count: parseInt(form.foundressCount) || null,
+          nest_height: toFloatOrNull(form.nestHeight),
+          foundress_count: toIntOrNull(form.foundressCount),
           males_present: form.malesPresent, other_species: form.otherSpecies,
           notes: form.notes, image_url: form.photo
         };
 
-        if (!online) {
-          addPendingRecord(payload);
+        // Queue locally, surfacing a real error if the device storage is full
+        // instead of silently dropping the record.
+        const queueOffline = () => {
+          if (!addPendingRecord(payload)) {
+            alert("⚠️ Could not save on this device — local storage may be full. Try removing the photo, then save again.");
+            return false;
+          }
           setPendingRecords(getPendingRecords());
           setSavedOffline(true);
           setTimeout(() => { setSavedOffline(false); setForm({...FIELDS}); setStep(0); setView("home"); }, 2000);
-          return;
-        }
+          return true;
+        };
+
+        if (!online) { queueOffline(); return; }
 
         try {
+          // If the photo was captured offline earlier, it's a data: URL — push it
+          // to Storage first so the DB row holds a real URL.
+          if (payload.image_url && payload.image_url.startsWith("data:")) {
+            payload.image_url = await uploadDataUrl(payload.image_url);
+          }
+
           // Step 1: insert
           const { error: insertErr } = await _supabase.from('wasp_observations').insert([payload]);
           if (insertErr) throw insertErr;
 
-          // Step 2: VERIFY the record actually exists in the database
+          // Step 2: VERIFY via the unique client_uuid (never nest_id, which can
+          // legitimately repeat across devices and would make maybeSingle() throw).
           const { data: verified, error: verifyErr } = await _supabase
             .from('wasp_observations')
-            .select('nest_id')
-            .eq('nest_id', payload.nest_id)
+            .select('client_uuid')
+            .eq('client_uuid', payload.client_uuid)
             .maybeSingle();
 
           if (verifyErr || !verified) {
@@ -351,10 +461,7 @@
           setTimeout(() => { setSaved(false); setForm({...FIELDS}); setStep(0); setView("home"); }, 1500);
         } catch (err) {
           console.error("Submit failed:", err);
-          addPendingRecord(payload);
-          setPendingRecords(getPendingRecords());
-          setSavedOffline(true);
-          setTimeout(() => { setSavedOffline(false); setForm({...FIELDS}); setStep(0); setView("home"); }, 2000);
+          queueOffline();
         }
       }
 
@@ -394,11 +501,18 @@
 
         for (const r of pending) {
           try {
-            const { data: existing } = await _supabase
-              .from('wasp_observations')
-              .select('nest_id')
-              .eq('nest_id', r.nest_id)
-              .maybeSingle();
+            let existing = null;
+            if (r.client_uuid) {
+              const { data } = await _supabase
+                .from('wasp_observations').select('client_uuid')
+                .eq('client_uuid', r.client_uuid).maybeSingle();
+              existing = data;
+            } else {
+              const { data } = await _supabase
+                .from('wasp_observations').select('nest_id')
+                .eq('nest_id', r.nest_id).maybeSingle();
+              existing = data;
+            }
             if (existing) result.zombies.push(r);
             else result.real.push(r);
           } catch (e) {
@@ -525,7 +639,7 @@
               </div>
             )}
 
-            <button style={s.bigBtn} onClick={()=>{setForm({...FIELDS, nestId: generateNestId(records), observer: getSavedObserver()});setStep(0);setErrors({});setView("new");}}>＋ &nbsp;New Nest Record</button>
+            <button style={s.bigBtn} onClick={()=>{setForm({...FIELDS, nestId: generateNestId(records), clientUuid: genUUID(), observer: getSavedObserver()});setStep(0);setErrors({});setView("new");}}>＋ &nbsp;New Nest Record</button>
             <button style={s.outlineBtn} onClick={()=>setView("list")}>📋 &nbsp;View All Records ({databaseCount}{pendingRecords.length>0?` + ${pendingRecords.length} pending`:""})</button>
             {online && <button style={s.verifyBtn} onClick={checkMyData} disabled={verifying}>{verifying ? "⏳ Checking..." : "🔍 Check My Data"}</button>}
             {databaseCount > 0 && <button style={s.outlineBtn} onClick={exportCSV}>⬇ &nbsp;Export CSV (Database Only)</button>}
