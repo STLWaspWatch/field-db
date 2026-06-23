@@ -1,4 +1,6 @@
-const CACHE_NAME = 'wasp-field-log-v2';
+// Bumped to v3: changing this string is what makes the browser re-install the
+// service worker and purge the stale v2 cache that held the old index.html.
+const CACHE_NAME = 'wasp-field-log-v3';
 const ASSETS = [
   '/field-db/',
   '/field-db/index.html',
@@ -24,16 +26,41 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', event => {
   // Only intercept GETs
   if (event.request.method !== 'GET') return;
-
+  const url = event.request.url;
   // Never intercept Supabase or external APIs - let them go straight to network
-  if (event.request.url.includes('supabase.co')) return;
-  if (event.request.url.includes('nominatim.openstreetmap.org')) return;
+  if (url.includes('supabase.co')) return;
+  if (url.includes('nominatim.openstreetmap.org')) return;
 
-  // Cache-first for everything else (your app shell)
+  // NETWORK-FIRST for the app shell HTML. When online, always fetch the latest
+  // index.html so a new GitHub Pages deploy is picked up on the next open.
+  // When offline, fall back to the cached copy so the field app still works.
+  const isHTML =
+    event.request.mode === 'navigate' ||
+    url.endsWith('/field-db/') ||
+    url.endsWith('/field-db/index.html');
+
+  if (isHTML) {
+    event.respondWith(
+      fetch(event.request)
+        .then(response => {
+          if (response && response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+          }
+          return response;
+        })
+        .catch(() =>
+          caches.match(event.request).then(c => c || caches.match('/field-db/index.html'))
+        )
+    );
+    return;
+  }
+
+  // CACHE-FIRST for everything else (icons, manifest, and CDN libs once seen).
   event.respondWith(
     caches.match(event.request).then(cached => {
       return cached || fetch(event.request).then(response => {
-        if (response.status === 200 && event.request.url.startsWith(self.location.origin)) {
+        if (response.status === 200 && url.startsWith(self.location.origin)) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
         }
